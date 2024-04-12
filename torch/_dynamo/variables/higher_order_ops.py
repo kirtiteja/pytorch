@@ -1425,7 +1425,8 @@ class TemplatedAttentionHigherOrderVariable(TorchHigherOrderOperatorVariable):
         # Proxying user defined functions is not supported.
         inp_args, _ = proxy_args_kwargs(proxied_args, {})
 
-        # Why is this here? Unlike other HOPs, the subgrpah's output for this hop is unrelated
+        # Note:[TemplatedAttention out example value]
+        # Why is this here? Unlike other HOPs, the subgraph's output for this hop is unrelated
         # to what the overall HOP returns, we create the correct output proxy by calling the
         # hop (self.value) with the example values.
         with torch._guards.TracingContext.try_get().fake_mode:
