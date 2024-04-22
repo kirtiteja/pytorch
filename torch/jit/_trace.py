@@ -300,6 +300,32 @@ def indent(s):
     return "\n".join(["\t" + line for line in s.splitlines()])
 
 
+@contextlib.contextmanager
+def patch_forward(obj: torch.nn.Module, new_method):
+    """Helper method to make it easier to cleanly torch.export() a method on a
+    module that is not `forward`.
+
+    TODO(suo): upstream this to torch.export.wrapper.
+    """
+    # Save the original method
+    original_method = obj.forward
+
+    # Patch the method
+    obj.forward = new_method.__get__(obj, obj.__class__)
+
+    try:
+        yield
+    finally:
+        # Restore the original method
+        obj.forward = original_method
+
+
+class WrapperModule(torch.nn.Module):
+    def __init__(self, f):
+        super().__init__()
+        self.forward = f
+
+
 class TracingCheckError(Exception):
     def __init__(self, graph_diff_error, tensor_compare_error, extra_msg=None):
         self.message = "Tracing failed sanity checks!\n"
@@ -973,23 +999,57 @@ def trace(
 
     if not via_export:
         return _trace_impl(func, example_inputs, optimize, check_trace, check_inputs, check_tolerance, strict, _force_outplace, _module_class, _compilation_unit, example_kwarg_inputs, _store_inputs)
-
     export_example_inputs = process_trace_inputs_for_export(example_inputs)
     traced_func = _trace_impl(func, example_inputs, optimize, check_trace, check_inputs, check_tolerance, strict, _force_outplace, _module_class, _compilation_unit, example_kwarg_inputs, _store_inputs)
 
-    class WrapperMod(torch.nn.Module):
-        def __init__(self, fn):
-            super().__init__()
-            self.fn = fn
-        def forward(self, *args, **kwargs):
-            return self.fn(*args, **kwargs)
 
     if isinstance(traced_func, torch._C.ScriptModule):
-        traced_mod = traced_func
-    else:
-        traced_mod = WrapperMod(traced_func)
+        try:
+            from torch.export import export
+            exported = export(traced_func, export_example_inputs, example_kwarg_inputs, strict=False).module()
+        except Exception as e:
+            raise RuntimeError(f"Failed to export {func} with error message:\n{e}")
 
-    return torch.export.export(traced_mod, export_example_inputs, example_kwarg_inputs, strict=False).module()
+        result_exported = exported(*export_example_inputs, **example_kwarg_inputs)
+        result_traced = traced_func(*export_example_inputs, **example_kwarg_inputs)
+        if not torch.allclose(result_exported, result_traced):
+            raise RuntimeError("Accuracy error")
+
+    elif isinstance(traced_func, torch._C.ScriptMethod) and isinstance(traced_func.owner(), torch._C.ScriptModule):
+        with patch_forward(traced_func.owner(), traced_func):
+            try:
+                from torch.export import export
+                exported = export(
+                    traced_func.owner(),
+                    export_example_inputs,
+                    example_kwarg_inputs,
+                    strict=False,
+                ).module()
+            except Exception as e:
+                raise RuntimeError(f"Failed to export {func} with error message:\n{e}")
+        result_exported = exported(*export_example_inputs, **example_kwarg_inputs)
+        result_traced = traced_func(*export_example_inputs, **example_kwarg_inputs)
+        if not torch.allclose(result_exported, result_traced):
+            raise RuntimeError("Accuracy error")
+    else:
+        try:
+            from torch.export import export
+            exported = export(
+                WrapperModule(traced_func),
+                export_example_inputs,
+                example_kwarg_inputs,
+                strict=False,
+            ).module()
+        except Exception as e:
+            raise RuntimeError(f"Failed to export {func} with error message:\n{e}")
+
+        result_exported = exported(*export_example_inputs, **example_kwarg_inputs)
+        result_traced = traced_func(*export_example_inputs, **example_kwarg_inputs)
+        if not torch.allclose(result_exported, result_traced):
+            raise RuntimeError("Accuracy error")
+
+    warnings.warn("TORCH.EXPORT SUCCEEDED")
+    return traced_func
 
 _trace_module_map: Optional[Dict[Any, Any]] = None
 
