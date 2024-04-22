@@ -120,7 +120,7 @@ def arch_type(arch_version: str) -> str:
     elif arch_version in CPU_AARCH64_ARCH:
         return "cpu-aarch64"
     elif arch_version in CPU_S390X_ARCH:
-        return "cpu-s390x"
+        return "cpu"
     else:  # arch_version should always be "cpu" in this case
         return "cpu"
 
