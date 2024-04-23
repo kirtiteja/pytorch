@@ -294,6 +294,7 @@ if HAS_CUDA and not TEST_WITH_ASAN:
 
         @parametrize("backend", ("inductor", "cudagraphs"))
         @torch._dynamo.config.patch("cudagraph_backend_keep_input_mutation", True)
+        @torch._inductor.config.patch("triton.cudagraph_support_input_mutation", True)
         def test_mutation_on_inp(self, backend):
             def foo(x):
                 x.add_(2)
@@ -339,6 +340,36 @@ if HAS_CUDA and not TEST_WITH_ASAN:
 
         @parametrize("backend", ("inductor", "cudagraphs"))
         @torch._dynamo.config.patch("cudagraph_backend_keep_input_mutation", True)
+        @torch._inductor.config.patch("triton.cudagraph_support_input_mutation", False)
+        def test_mutation_cudagraph_managed_tensors_config(self, backend):
+            def foo(x):
+                return x + 1
+
+            def mut(x):
+                x.add_(2)
+                return x
+
+            def non_mut(x):
+                return x.add(2)
+
+            mut = get_compile_fn(backend)(mut)
+            foo = get_compile_fn(backend)(foo)
+
+            with capture_stderr() as captured_output:
+                for i in range(3):
+                    torch.compiler.cudagraph_mark_step_begin()
+                    inp = torch.rand([4], device="cuda")
+
+                    tmp = foo(inp)
+                    mut_out = mut(tmp)
+                    self.assertEqual(mut_out, non_mut(foo(inp)))
+            FileCheck().check_count(
+                "skipping cudagraphs due to mutation on input.", 1, exactly=True
+            ).run(captured_output[1])
+
+        @parametrize("backend", ("inductor", "cudagraphs"))
+        @torch._dynamo.config.patch("cudagraph_backend_keep_input_mutation", True)
+        @torch._inductor.config.patch("triton.cudagraph_support_input_mutation", True)
         def test_mutation_cudagraph_managed_tensors(self, backend):
             def foo(x):
                 return x + 1
@@ -380,6 +411,7 @@ if HAS_CUDA and not TEST_WITH_ASAN:
 
         @parametrize("backend", ("inductor", "cudagraphs"))
         @torch._dynamo.config.patch("cudagraph_backend_keep_input_mutation", True)
+        @torch._inductor.config.patch("triton.cudagraph_support_input_mutation", True)
         def test_mutation_cudagraph_managed_tensor_warn(self, backend):
             def foo(x):
                 return x.add_(1)
@@ -403,6 +435,7 @@ if HAS_CUDA and not TEST_WITH_ASAN:
 
         @parametrize("backend", ("inductor", "cudagraphs"))
         @torch._dynamo.config.patch("cudagraph_backend_keep_input_mutation", True)
+        @torch._inductor.config.patch("triton.cudagraph_support_input_mutation", True)
         def test_mutation_cudagraph_managed_tensor_warn_only_once(self, backend):
             def foo(x):
                 return x + 1
