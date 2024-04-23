@@ -778,7 +778,7 @@ class cuda:
     # 2）CUDACXX environment variable
     # 3）CUDA_HOME environment variable
     # 4) default system search PATH.
-    cuda_cxx: Optional[str] = None
+    cuda_cxx: Optional[str] = os.environ.get("CUDA_NVCC_EXECUTABLE", None)
 
     # Minimum value of M*N*K to consider the CUTLASS backend for GEMM ops.
     cutlass_backend_min_gemm_size: int = 1
