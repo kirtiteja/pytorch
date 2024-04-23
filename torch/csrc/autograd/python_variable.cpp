@@ -631,6 +631,29 @@ static PyObject* THPVariable_view_func_unsafe(
   return view_func_impl(self_, args, kwargs, /*check_has_same_meta=*/false);
 }
 
+static PyObject* THPVariable_set_sizes_and_strides(
+    PyObject* self_,
+    PyObject* args,
+    PyObject* kwargs) {
+  HANDLE_TH_ERRORS
+  const auto& self = THPVariable_Unpack(self_);
+
+  static PythonArgParser parser({
+      "_set_sizes_and_strides(SymIntArrayRef size, SymIntArrayRef strides, SymInt? storage_offset=None)",
+  });
+  ParsedArgs<3> parsed_args{};
+  auto r = parser.parse(args, kwargs, parsed_args);
+  auto sym_sizes = r.symintlist(0);
+  auto sym_strides = r.symintlist(1);
+  auto sym_storage_offset = r.toSymIntOptional(2);
+
+  self.unsafeGetTensorImpl()->set_sizes_and_strides(
+      sym_sizes, sym_strides, sym_storage_offset);
+
+  Py_RETURN_NONE;
+  END_HANDLE_TH_ERRORS
+}
+
 static PyObject* rev_view_func_impl(PyObject* self_, PyObject* arg) {
   HANDLE_TH_ERRORS
   const auto& self = THPVariable_Unpack(self_);
@@ -751,9 +774,9 @@ static PyObject* THPVariable_make_wrapper_subclass(
       "SymInt? storage_offset=None, MemoryFormat? memory_format=None, ScalarType dtype=None, "
       "Layout layout=torch.strided, Device device=None, bool pin_memory=False, bool requires_grad=False, "
       "c10::string_view? dispatch_sizes_strides_policy=None, bool dispatch_device=False, bool dispatch_layout=False, "
-      "DispatchKeySet _extra_dispatch_keys=None)",
+      "DispatchKeySet _extra_dispatch_keys=None, bool _allocate_storage=True)",
   });
-  ParsedArgs<14> parsed_args{};
+  ParsedArgs<15> parsed_args{};
   auto r = parser.parse(args, kwargs, parsed_args);
   PyObject* cls = r.pyobject(0);
 
@@ -803,7 +826,11 @@ static PyObject* THPVariable_make_wrapper_subclass(
 
     c10::SymInt size_bytes;
     auto dtype_itemsize = static_cast<int64_t>(options.dtype().itemsize());
-    if (sym_strides.has_value()) {
+    bool allocate_storage = r.toBool(14);
+
+    if (!allocate_storage) {
+      size_bytes = 0;
+    } else if (sym_strides.has_value()) {
       size_bytes = at::detail::computeStorageNbytes(
           sym_sizes,
           sym_strides.value(),
@@ -1744,6 +1771,10 @@ static PyMethodDef extra_methods[] = {
     {"_rev_view_func_unsafe",
      THPVariable_rev_view_func_unsafe,
      METH_O,
+     nullptr},
+    {"_set_sizes_and_strides",
+     castPyCFunctionWithKeywords(THPVariable_set_sizes_and_strides),
+     METH_VARARGS | METH_KEYWORDS,
      nullptr},
     {nullptr}};
 
