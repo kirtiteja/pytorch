@@ -209,6 +209,12 @@ def tuned_int_mm(mat1, mat2, *, layout=None):
                 layout=layout,
                 **mm_options(config, m, n, k, layout),
             )
+    if len(choices) == 0:
+        log.warning(
+            "No choices for integer GEMM avaialbe using configured backends, using ATen backend as fallback"
+        )
+        choices = [aten__int_mm.bind((mat1, mat2), layout)]
+
     try:
         return autotune_select_algorithm("int_mm", choices, [mat1, mat2], layout)
     except NoValidChoicesError:
@@ -284,13 +290,17 @@ def tuned_addmm(inp, mat1, mat2, *, alpha=1, beta=1, layout=None):
             )
 
     if static_shape and is_nonzero and use_cutlass_template(layout, m, n, k):
-        CUTLASSGemmTemplate.add_cutlass_gemm_choices(
-            choices,
-            layout,
-            [mat1, mat2, inp_expanded],
-            alpha=alpha,
-            beta=beta,
-        )
+        if (
+            WrapperCodeGen.statically_known_int_or_none(inp_expanded.layout.stride[-1])
+            != 0
+        ):
+            CUTLASSGemmTemplate.add_cutlass_gemm_choices(
+                choices,
+                layout,
+                [mat1, mat2, inp_expanded],
+                alpha=alpha,
+                beta=beta,
+            )
 
     use_aten = use_aten_gemm_kernels()
     if len(choices) == 0 and not use_aten:
