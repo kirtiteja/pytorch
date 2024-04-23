@@ -21,7 +21,7 @@ import subprocess
 import sys
 import time
 import weakref
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 from typing import (
     Any,
@@ -684,14 +684,19 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
             with maybe_mark_profile(p=p, mark="actual"), maybe_enable_compiled_autograd(
                 args.compiled_autograd
             ):
-                timings[rep, 1], actual_output = timed(
-                    model,
-                    frozen_model_iter_fn,
-                    inputs,
-                    return_result=True,
-                    times=times,
-                    collect_outputs=args.collect_outputs,
+                compiled_model = kwargs.get("compiled_model", model)
+                maybe_run_with_seperate_optimizer_fn = kwargs.get(
+                    "maybe_run_with_seperate_optimizer_fn", nullcontext()
                 )
+                with maybe_run_with_seperate_optimizer_fn():
+                    timings[rep, 1], actual_output = timed(
+                        compiled_model,
+                        frozen_model_iter_fn,
+                        inputs,
+                        return_result=True,
+                        times=times,
+                        collect_outputs=args.collect_outputs,
+                    )
 
     if args.export_profiler_trace:
         name = args.profiler_trace_name + "_" + model.name
@@ -755,11 +760,16 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
         for k, v in kwargs["dynamo_stats"].items():
             headers.append(k)
             row.append(v)
-    output_csv(
-        output_filename,
-        headers,
-        row,
-    )
+    if (
+        not torch.distributed.is_available()  # no distributed is built
+        or not torch.distributed.is_initialized()  # single gpu
+        or torch.distributed.get_rank() == 0  # distributed + rank0
+    ):
+        output_csv(
+            output_filename,
+            headers,
+            row,
+        )
     headers, data = torch._dynamo.utils.compile_times(repr="csv", aggregate=True)
     assert (
         output_filename.find(".csv") > 0
@@ -2713,11 +2723,29 @@ class BenchmarkRunner:
             dynamo_stats.subtract(start_stats)
             return latency, peak_mem, dynamo_stats
 
+        def need_seperate_model_optimizer():
+            return self.args.init_distributed and self.args.compiled_autograd
+
+        @contextmanager
+        def maybe_run_with_seperate_optimizer():
+            saved_optimizer = self.optimizer
+            if need_seperate_model_optimizer():
+                self.optimizer = self.seperate_optimizer
+            yield
+            self.optimizer = saved_optimizer
+
         # Cast the model to float16/float32 as necessary
-        model, example_inputs = self.maybe_cast(model, example_inputs)
+        orig_model, example_inputs = self.maybe_cast(model, example_inputs)
 
         # Use distributed wrapping as necessary
-        model = self.deepcopy_and_maybe_parallelize(model)
+        model = self.deepcopy_and_maybe_parallelize(orig_model)
+        if need_seperate_model_optimizer():
+            # If DDP + compiler is enabled, we need to use a seperate model
+            compiled_model = self.deepcopy_and_maybe_parallelize(orig_model)
+            self.init_optimizer(name, current_device, compiled_model.parameters())
+            self.seperate_optimizer = self.optimizer
+        else:
+            compiled_model = model
 
         self.init_optimizer(name, current_device, model.parameters())
 
@@ -2760,9 +2788,13 @@ class BenchmarkRunner:
             ), maybe_snapshot_memory(
                 self.args.snapshot_memory, f"compiled_{self.args.only}"
             ):
-                dynamo_latency, dynamo_peak_mem, dynamo_stats = warmup(
-                    optimized_model_iter_fn, model, example_inputs, "dynamo"
-                )
+                with maybe_run_with_seperate_optimizer():
+                    dynamo_latency, dynamo_peak_mem, dynamo_stats = warmup(
+                        optimized_model_iter_fn,
+                        compiled_model,
+                        example_inputs,
+                        "dynamo",
+                    )
                 if self.args.use_warm_peak_memory:
                     _, dynamo_peak_mem, _ = warmup(
                         optimized_model_iter_fn,
@@ -2817,10 +2849,12 @@ class BenchmarkRunner:
                 results = []
                 # run with torch._dynamo few times to populate the cache
                 for _ in range(3):
-                    optimized_model_iter_fn(model, example_inputs)
+                    with maybe_run_with_seperate_optimizer():
+                        optimized_model_iter_fn(compiled_model, example_inputs)
                 _, frames_second_pass = Stats.reset_counters()  # should be 0
                 if frames_second_pass > 0:
-                    optimized_model_iter_fn(model, example_inputs)
+                    with maybe_run_with_seperate_optimizer():
+                        optimized_model_iter_fn(compiled_model, example_inputs)
                     _, frames_third_pass = Stats.reset_counters()  # should be 0
                 else:
                     frames_third_pass = 0
@@ -2836,6 +2870,11 @@ class BenchmarkRunner:
 
             if not hasattr(model, name):
                 model.name = name
+            if need_seperate_model_optimizer:
+                experiment_kwargs["compiled_model"] = compiled_model
+            experiment_kwargs[
+                "maybe_run_with_seperate_optimizer_fn"
+            ] = maybe_run_with_seperate_optimizer
             results.append(experiment(model, example_inputs, **experiment_kwargs))
             return " ".join(map(str, results))
 
@@ -3609,6 +3648,11 @@ def run(runner, args, original_dir=None):
     if args.ddp:
         assert args.training, "DDP benchmark requires --training mode"
         torch._dynamo.config.optimize_ddp = args.optimize_ddp_mode
+        if args.compiled_autograd and args.optimize_ddp_mode != "python_reducer":
+            log.error(
+                "CompiledAutograd + DDP is only compatible with python_reducer."
+            )
+            return sys.exit(-1)
         if args.only == "dlrm":
             log.error(
                 "DLRM+DDP is unsupported as it requires sharding the embedding layer separately from DDP"
