@@ -1217,6 +1217,37 @@ invalid_vec_isa = InvalidVecISA()
 supported_vec_isa_list = [VecAVX512(), VecAVX2(), VecNEON()]
 
 
+def get_simdlen_from_cpu_capability(capability: str | None, vec_isa_list: List[VecISA]):
+    # VSX is not supported in inductor
+    simdlen_cpu_capability = {
+        "default": 0,
+        "neon": 256,
+        "zvector": 256,
+        "avx2": 256,
+        "avx512": 512,
+    }
+
+    if (
+        (capability in ["neon", "default"] and isinstance(vec_isa_list[0], VecNEON))
+        or (
+            capability in ["zvector", "default"]
+            and isinstance(vec_isa_list[0], VecZVECTOR)
+        )
+        or (
+            capability in ["avx512", "avx2", "default"]
+            and isinstance(vec_isa_list[0], VecAVX512)
+        )
+        or (capability in ["avx2", "default"] and isinstance(vec_isa_list[0], VecAVX2))
+    ):
+        return simdlen_cpu_capability[capability]
+    else:
+        if capability:
+            warnings.warn(
+                f"ignoring invalid value for ATEN_CPU_CAPABILITY {capability}"
+            )
+        return None
+
+
 # Cache the cpuinfo to avoid I/O overhead. Meanwhile, the cpuinfo content
 # might have too much redundant content that is useless for ISA check. Hence,
 # we only cache some key isa information.
@@ -1248,13 +1279,19 @@ def pick_vec_isa() -> VecISA:
     if not _valid_vec_isa_list:
         return invalid_vec_isa
 
-    # If the simdlen is None, it indicates determin the vectorization length automatically
-    if config.cpp.simdlen is None:
-        assert _valid_vec_isa_list
+    # If the simdlen is None, set simdlen based on the environment ATEN_CPU_CAPABILITY
+    # to control CPU vec ISA
+    simdlen = config.cpp.simdlen
+    if simdlen is None:
+        simdlen = get_simdlen_from_cpu_capability(
+            os.getenv("ATEN_CPU_CAPABILITY"), _valid_vec_isa_list
+        )
+    # If the simdlen is still None, it indicates determin the vectorization length automatically
+    if simdlen is None:
         return _valid_vec_isa_list[0]
 
     for isa in _valid_vec_isa_list:
-        if config.cpp.simdlen == isa.bit_width():
+        if simdlen == isa.bit_width():
             return isa
 
     return invalid_vec_isa
