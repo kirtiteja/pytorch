@@ -651,8 +651,7 @@ class ExportedProgram:
 
         new_range_constraints = _get_updated_range_constraints(
             gm,
-            self._num_lifted_params_buffers(),
-            pytree.tree_leaves(self.example_inputs),
+            self.range_constraints,
             _is_executorch=False,
         )
 
@@ -761,8 +760,7 @@ class ExportedProgram:
             state_dict=self.state_dict,
             range_constraints=_get_updated_range_constraints(
                 transformed_gm,
-                self._num_lifted_params_buffers(),
-                pytree.tree_leaves(self.example_inputs),
+                self.range_constraints,
                 _is_executorch=False,
             ),
             module_call_graph=copy.deepcopy(self._module_call_graph),
@@ -809,8 +807,7 @@ class ExportedProgram:
 
 def _get_updated_range_constraints(
     gm: torch.fx.GraphModule,
-    num_lifted: Optional[int] = None,
-    example_inputs: Optional[List[Any]] = None,
+    old_range_constraints: "Dict[sympy.Symbol, Any]",
     _is_executorch: bool = True,
 ) -> "Dict[sympy.Symbol, Any]":
     def get_shape_env(gm):
@@ -830,8 +827,6 @@ def _get_updated_range_constraints(
 
     # FIXME(tmanlaibaatar) Remove this whole branch once https://github.com/pytorch/pytorch/pull/123764
     if _is_executorch:
-        assert num_lifted is None
-        assert example_inputs is None
         shape_env, _ = get_shape_env(gm)
         if shape_env is None:
             return {}
@@ -848,17 +843,11 @@ def _get_updated_range_constraints(
                 range_constraints[k] = v
         return range_constraints
 
-    assert num_lifted is not None
-    assert example_inputs is not None
-
     shape_env, fake_mode = get_shape_env(gm)
     if shape_env is None:
         return {}
 
-    from torch.export.dynamic_shapes import _process_constraints
-
-    range_constraints = _process_constraints(fake_mode, gm, num_lifted, example_inputs)
-
+    range_constraints = copy.copy(old_range_constraints)
     range_constraints = {
         k: v for k, v in range_constraints.items() if k not in shape_env.replacements
     }
