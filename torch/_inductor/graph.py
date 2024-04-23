@@ -1,3 +1,4 @@
+import contextlib
 import itertools
 import logging
 import operator
@@ -73,6 +74,7 @@ from .utils import (
     gather_origins,
     get_cloned_parameter_buffer_name,
     get_sympy_Expr_dtype,
+    should_assume_input_aligned,
 )
 from .virtualized import V
 
@@ -396,6 +398,8 @@ class GraphLowering(torch.fx.Interpreter):
 
         self.effectful_ops: Dict[_EffectType, ir.Buffer] = {}
 
+        self.aligned_inputs: Set[str] = set()
+
     @staticmethod
     def decide_layout_opt(gm, *, is_inference) -> bool:
         """
@@ -702,6 +706,7 @@ class GraphLowering(torch.fx.Interpreter):
             and buffer.get_device() is not None
         ):
             self.add_device_info(buffer.get_device())
+
         return name
 
     def register_list(self, buffer_names: List[str]):
@@ -855,7 +860,27 @@ class GraphLowering(torch.fx.Interpreter):
         self.graph_inputs[target] = tensor
         self.graph_inputs_original[target] = tensor.data.data
         self.add_device_info(example.device)
-        return tensor
+
+        # Note: [Input Alignment handling in Inductor]
+        # Alignment matters for generating efficient code. Some operations,
+        # e.g. vectorized loads, can only be performed on aligned inputs.
+        #
+        # But if we codegen assuming aligned inputs and then get unaligned
+        # inputs at runtime, then we are forced to clone - which is bad for
+        # both perf and memory usage.
+        #
+        # One option would be to guard on storage_offset%ALIGNMENT, and then
+        # codegen based on this. But storage_offset guards turned out to be
+        # expensive and cause recompiles; Instead, we're generating code
+        # based on the alignment of the example input without guarding.
+        ctx = contextlib.nullcontext()
+        if tracing_context := torch._guards.TracingContext.try_get():
+            # avoid creating guards on input's storage offset
+            ctx = tracing_context.fake_mode.shape_env.suppress_guards()
+        with ctx:
+            if should_assume_input_aligned(example):
+                self.aligned_inputs.add(target)
+            return tensor
 
     def call_function(self, target, args, kwargs):
         if target is operator.getitem and isinstance(args[0], (list, tuple, dict)):
